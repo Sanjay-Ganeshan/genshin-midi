@@ -7,6 +7,7 @@ import typing as T
 import pygame
 import pygame.midi
 import numpy as np
+from dataclasses import dataclass, field
 import colorsys
 import time
 pygame.init()
@@ -42,11 +43,17 @@ MAKE_TRANSPARENT = True
 
 def make_window_transparent():
     # Create layered window
+    NOSIZE = 1
+    NOMOVE = 2
+    TOPMOST = -1
+    NOT_TOPMOST = -2
+    w, h = pygame.display.get_window_size()
     hwnd = pygame.display.get_wm_info()["window"]
     win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE,
                         win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE) | win32con.WS_EX_LAYERED)
     # Set window transparency color
     win32gui.SetLayeredWindowAttributes(hwnd, win32api.RGB(*TRANSPARENT_BACKGROUND), 0, win32con.LWA_COLORKEY)
+    win32gui.SetWindowPos(hwnd, TOPMOST, 0, 0, w, h, 0)
 
 
 def midi_pitch_to_name(pitch: int) -> T.Optional[str]:
@@ -202,14 +209,7 @@ class KeySquare:
     def fake_toggle(self):
         self.should_be_down = not self.should_be_down
 
-    def draw(self, now: float) -> None:
-        # Get common drawing info
-        block_width, block_height = self.game.norm_size_to_abs(self.game.key_size)
-        left, top = self.game.norm_pos_to_abs((self.norm_xpos, self.norm_ypos), (block_width, block_height))
-        disp = pygame.display.get_surface()
-
-        # Draw upcoming notes
-
+    def draw_upcoming_notes(self, now: float, top: int, block_width: int, block_height: int, disp: pygame.Surface):
         drawing_block = self.when_ix
         drawing_is_stop = self.should_be_down
         prev_height = top
@@ -240,6 +240,51 @@ class KeySquare:
             else:
                 # Everything else is later
                 break
+    
+    def draw_past_notes(self, now: float, top: int, block_width: int, block_height: int, disp: pygame.Surface):
+        drawing_block = len(self.when)-1
+        drawing_is_stop = self.is_really_down
+        prev_height = top
+        is_first = True
+        while drawing_block >= 0 and drawing_block < len(self.when):
+            drawing_at = self.when[drawing_block]
+            since_then = now - drawing_at
+            assert since_then >= 0, "Shouldn't be in here"
+            if drawing_is_stop or since_then < self.game.lookahead:
+                norm_since = min(since_then / self.game.lookahead, 1.0)
+                norm_height_diff = self.game.lookahead_height * norm_since
+                block_norm_ypos = self.norm_ypos - norm_height_diff
+                block_left, block_top = self.game.norm_pos_to_abs((self.norm_xpos, block_norm_ypos), (block_width , block_height))
+                
+                if drawing_is_stop or (is_first and self.is_really_down):
+                    extend_block_height = prev_height - block_top
+                    outline_size = block_width // 7
+                    if extend_block_height > outline_size * 2:
+                        pygame.draw.rect(disp, self.bright_color, pygame.Rect(block_left, block_top, block_width, extend_block_height), 0, block_width // 3)
+                        if is_first and self.is_really_down:
+                            pygame.draw.rect(disp, (0,0,0), pygame.Rect(block_left, block_top, block_width, extend_block_height), block_width // 7, block_width // 4)
+                else:
+                    prev_height = block_top
+                
+                drawing_block -= 1
+                drawing_is_stop = not drawing_is_stop
+                is_first = False
+            else:
+                # Everything else is later
+                break
+
+    def draw(self, now: float) -> None:
+        # Get common drawing info
+        block_width, block_height = self.game.norm_size_to_abs(self.game.key_size)
+        left, top = self.game.norm_pos_to_abs((self.norm_xpos, self.norm_ypos), (block_width, block_height))
+        disp = pygame.display.get_surface()
+
+        # Draw upcoming notes
+
+        if self.game.recording_mode and not (self.game.reviewing_recording()):
+            self.draw_past_notes(now, top, block_width, block_height, disp)
+        else:
+            self.draw_upcoming_notes(now, top, block_width, block_height, disp)
 
 
         # Draw the key
@@ -302,22 +347,32 @@ class KeySquare:
         return [(self.midi_key, when) for when in self.when]
 
 
-class MIDIRenderer():
-    def __init__(self):
-        # Settings
-        self.recording_plays = False
-        self.keep_in_bounds = True
-        self.macro_output = False
-        self.ignore_keypresses = (False) or self.macro_output
-        self.play_sounds = True
-        self.key_size: T.Tuple[float, float] = (0.035, 0.08)
-        self.lookahead: float = 1.0
-        self.lookahead_height: float = 0.42
-        self.timescale = 1.0
-        self.paused = True # Do we start paused?
-        self.progression_mode = False
+@dataclass
+class GameSettings:
+    recording_plays: bool = field(default=True)
+    keep_in_bounds: bool = field(default=True)
+    macro_output: bool = field(default=True)
+    ignore_keypresses: bool = field(default=False)
+    play_sounds: bool = field(default=True)
+    key_size: T.Tuple[float, float] = field(default=(0.035, 0.08))
+    lookahead: float = field(default=1.0)
+    lookahead_height: float = field(default=0.42)
+    timescale: float = field(default=1.0)
+    paused: bool = field(default=True) # Do we start paused?
+    progression_mode: bool = field(default=False)
 
-        self.transpose_amount = 0 # Will be adjusted if we enqueue a song
+    transpose_amount = 0
+
+    def __post_init__(self):
+        if self.macro_output:
+            self.ignore_keypresses = True
+
+
+
+class MIDIRenderer():
+    def __init__(self, preset: T.Optional[GameSettings] = None):
+        # Settings
+        self.settings = preset or GameSettings()
         
         # Properties - these are determined / adjusted
         self.now: float = 0.0
@@ -350,6 +405,18 @@ class MIDIRenderer():
             pygame.display.set_caption("PLAYING")
 
         self._setup_keys()
+
+    def __getattr__(self, attrname) -> T.Any:
+        try:
+            return super().__getattr__(attrname)
+        except AttributeError:
+            return getattr(self.settings, attrname)
+    
+    def __setattr__(self, attrname, attrval) -> T.Any:
+        if attrname != "settings" and attrname in dir(self.settings):
+            return setattr(self.settings, attrname, attrval)
+        else:
+            return super().__setattr__(attrname, attrval)
 
     def _setup_keys(self):
         left_norm = 0.10
@@ -390,6 +457,15 @@ class MIDIRenderer():
 
     def save(self) -> None:
         dump_midi_file(self.dump())
+
+    def reviewing_recording(self) -> bool:
+        if not self.recording_mode:
+            return False
+        else:
+            for k_id in self.keys:
+                if self.keys[k_id].when_ix != len(self.keys[k_id].when):
+                    return True
+            return False
 
     def _rearrange(self):
         left_norm = 0.10
@@ -492,6 +568,7 @@ class MIDIRenderer():
                     else:
                         self.recording_mode = True
                         self.now = 0.0
+                        self.timescale = 1.0
             
                 if ev.key == pygame.K_RIGHT:
                     self.now += 15
@@ -504,6 +581,13 @@ class MIDIRenderer():
                     self.play_sounds = False
                     for k_id in self.keys:
                         self.keys[k_id].backout_before(self.now)
+                
+                if ev.key == pygame.K_UP:
+                    self.timescale += 0.1
+            
+                if ev.key == pygame.K_DOWN:
+                    self.timescale -= 0.1
+                    self.timescale = max(0.1, self.timescale)
             
                 if ev.key == pygame.K_1:
                     self.paused = not self.paused
@@ -609,11 +693,11 @@ class MIDIRenderer():
 
 
 def main():
-    pygame.display.set_mode((800, 480), pygame.RESIZABLE | pygame.WINDOWMAXIMIZED)
+    pygame.display.set_mode((800, 480), pygame.RESIZABLE)
     if MAKE_TRANSPARENT:
         make_window_transparent()
     game = MIDIRenderer()
-    # game.enqueue_file("canon_in_c", min_confidence=0)
+    game.enqueue_file("recording_1", min_confidence=0)
     #for each_song in game.known_files:
     #    game.enqueue_file(each_song)
     game.start()

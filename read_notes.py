@@ -84,7 +84,8 @@ def discover_files() -> T.Dict[str, str]:
     sources = [
         "D:\\Software\\Code\\PythonScripts\\MIDI\\midi_control\\data",
         "D:\\OneDrive\\Sheet Music\\MuseScoreDownloads\\MIDI",
-        "D:\\OneDrive\\Sheet Music\\Piano Music\\Piano Music\\MIDIs"
+        "D:\\OneDrive\\Sheet Music\\Piano Music\\Piano Music\\MIDIs",
+        RECORDINGS,
     ]
 
     all_found: T.Dict[str, str] = {}
