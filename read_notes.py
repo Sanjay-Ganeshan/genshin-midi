@@ -1,9 +1,11 @@
 import mido
-from mido.midifiles.midifiles import MidiFile
+from mido.midifiles.midifiles import DEFAULT_TICKS_PER_BEAT, DEFAULT_TEMPO
 mido.set_backend('mido.backends.rtmidi_python')
 
 import os
 import typing as T
+
+RECORDINGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
 
 def read_midi_file(fname: str) -> T.List[T.Tuple[int, float]]:
     print("Reading", fname)
@@ -49,6 +51,33 @@ def autotranspose(notes: T.List[T.Tuple[int, float]]) -> int:
     score = (len(notes)-best_penalty)/len(notes)
     return best_shift, score
 
+def dump_midi_file(notes: T.List[T.Tuple[int, float]], fname: T.Optional[str] = None) -> str:
+    if fname is None:
+        r_id = 0
+        while os.path.exists(fname := os.path.join(RECORDINGS, f"recording_{r_id}.midi")):
+            r_id += 1
+    
+    f = mido.MidiFile(type=0) # 0 - single channel, 1 - sync channels, 2 - async channels
+    track = f.add_track("main")
+    held_pitches = set()
+    last_time = 0
+    for (what, when) in sorted(notes, key = lambda what_and_when: what_and_when[1]):
+        if what in held_pitches:
+            msg_type = "note_off"
+            held_pitches.remove(what)
+        else:
+            msg_type = "note_on"
+            held_pitches.add(what)
+        # when is in abs time, we need it in tick-delta time
+        delta_seconds = when - last_time
+        last_time = when
+        # Convert to ticks. 1 beat = 1 second
+        n_ticks = mido.second2tick(delta_seconds, DEFAULT_TICKS_PER_BEAT, DEFAULT_TEMPO)
+
+        msg = mido.Message(type=msg_type, note=what, velocity=127, time=int(n_ticks))
+        track.append(msg)
+    f.save(fname)
+    return fname
 
 
 def discover_files() -> T.Dict[str, str]:

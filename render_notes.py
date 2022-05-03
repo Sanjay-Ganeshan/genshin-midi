@@ -12,7 +12,7 @@ import time
 pygame.init()
 pygame.midi.init()
 
-from read_notes import autotranspose, read_midi_file, discover_files
+from read_notes import autotranspose, read_midi_file, discover_files, dump_midi_file
 from interception_py.interception_sender import InterceptionSender
 
 TRANSPARENT_BACKGROUND = (255, 0, 128)
@@ -264,7 +264,10 @@ class KeySquare:
                 self.key_is_pressed = True
                 self.game.macro.keyDown(self.keyboard_key_name.lower())
                 self.game.macro.keyUp(self.keyboard_key_name.lower())
-
+            if self.game.recording_mode:
+                assert self.when_ix == len(self.when), "Still have stuff to play"
+                self.when.append(self.game.now)
+                self.when_ix += 1
                 
 
     
@@ -279,6 +282,11 @@ class KeySquare:
             if self.game.macro_output and not was_keypress and self.key_is_pressed:
                 assert self.game.ignore_keypresses, "Refuse!"
                 self.key_is_pressed = False
+            
+            if self.game.recording_mode:
+                assert self.when_ix == len(self.when), "Still have stuff to play"
+                self.when.append(self.game.now)
+                self.when_ix += 1
 
     def real_toggle(self, was_keypress: bool = False):
         if self.is_really_down:
@@ -289,6 +297,9 @@ class KeySquare:
     def okay_to_progress(self) -> bool:
         # It's okay to leave things on, but not to have them off
         return (not self.should_be_down) or (self.should_be_down and self.is_really_down)
+
+    def dump(self) -> T.List[T.Tuple[int, float]]:
+        return [(self.midi_key, when) for when in self.when]
 
 
 class MIDIRenderer():
@@ -302,9 +313,9 @@ class MIDIRenderer():
         self.key_size: T.Tuple[float, float] = (0.035, 0.08)
         self.lookahead: float = 1.0
         self.lookahead_height: float = 0.42
-        self.timescale = 0.25
+        self.timescale = 1.0
         self.paused = True # Do we start paused?
-        self.progression_mode = True
+        self.progression_mode = False
 
         self.transpose_amount = 0 # Will be adjusted if we enqueue a song
         
@@ -313,6 +324,7 @@ class MIDIRenderer():
         self.enqueue_at: float = 2.0
         self.is_done = False
         self.is_staggered = True
+        self.recording_mode = False
         self.window_size: T.Tuple[int, int] = pygame.display.get_window_size()
         self.mouse_pos: T.Tuple[int, int] = pygame.mouse.get_pos()
         self.keys: T.Dict[int, KeySquare] = {}
@@ -370,6 +382,15 @@ class MIDIRenderer():
                 pitch += 1
         self.is_staggered = True
     
+    def dump(self) -> T.List[T.Tuple[int, float]]:
+        full_dump: T.List[T.Tuple[int, float]] = []
+        for k_id in self.keys:
+            full_dump.extend(self.keys[k_id].dump())
+        return full_dump
+
+    def save(self) -> None:
+        dump_midi_file(self.dump())
+
     def _rearrange(self):
         left_norm = 0.10
         right_norm = 0.90
@@ -462,6 +483,15 @@ class MIDIRenderer():
                 if ev.key == pygame.K_ESCAPE:
                     self.is_done = True
                     break
+            
+                if ev.key == pygame.K_0:
+                    if self.recording_mode:
+                        self.is_done = True
+                        self.save()
+                        break
+                    else:
+                        self.recording_mode = True
+                        self.now = 0.0
             
                 if ev.key == pygame.K_RIGHT:
                     self.now += 15
@@ -583,9 +613,9 @@ def main():
     if MAKE_TRANSPARENT:
         make_window_transparent()
     game = MIDIRenderer()
+    # game.enqueue_file("canon_in_c", min_confidence=0)
     #for each_song in game.known_files:
     #    game.enqueue_file(each_song)
-    game.enqueue_file("canon_in_c", min_confidence=0)
     game.start()
 
 
