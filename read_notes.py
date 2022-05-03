@@ -6,6 +6,7 @@ import os
 import typing as T
 
 def read_midi_file(fname: str) -> T.List[T.Tuple[int, float]]:
+    print("Reading", fname)
     mid = mido.MidiFile(fname)
     all_notes: T.List[T.Tuple[int, float]] = []
     t = 0
@@ -44,7 +45,9 @@ def autotranspose(notes: T.List[T.Tuple[int, float]]) -> int:
         shift_and_pen.append((distance[rshift], pen))
     
     shift_and_pen.sort(key=lambda sp: (sp[1], abs(sp[0])))
-    return shift_and_pen[0][0]
+    best_shift, best_penalty = shift_and_pen[0]
+    score = (len(notes)-best_penalty)/len(notes)
+    return best_shift, score
 
 
 

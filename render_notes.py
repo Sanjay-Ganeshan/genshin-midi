@@ -225,9 +225,12 @@ class KeySquare:
                 block_left, block_top = self.game.norm_pos_to_abs((self.norm_xpos, block_norm_ypos), (block_width , block_height))
                 
                 if drawing_is_stop:
-                    pygame.draw.rect(disp, self.bright_color, pygame.Rect(block_left, block_top, block_width, prev_height-block_top), 0, block_width // 4)
-                    if is_first:
-                        pygame.draw.rect(disp, (0,0,0), pygame.Rect(block_left, block_top, block_width, prev_height-block_top), block_width // 7, block_width // 4)
+                    extend_block_height = prev_height-block_top
+                    outline_size = block_width // 7
+                    if extend_block_height > outline_size * 2:
+                        pygame.draw.rect(disp, self.bright_color, pygame.Rect(block_left, block_top, block_width, extend_block_height), 0, block_width // 3)
+                        if is_first and self.is_really_down:
+                            pygame.draw.rect(disp, (0,0,0), pygame.Rect(block_left, block_top, block_width, extend_block_height), block_width // 7, block_width // 4)
                 else:
                     prev_height = block_top
                 
@@ -243,7 +246,7 @@ class KeySquare:
         pygame.draw.rect(disp, self.dim_color if (self.is_really_down) else self.bright_color, pygame.Rect(left, top, block_width, block_height))
 
         # Draw the letter on the key
-        rendered_text = self.game.font.render(self.keyboard_key_name, True, FONT_COLOR, None)
+        rendered_text = self.game.font.render((self.keyboard_key_name if self.game.is_staggered else self._pitch_name), True, FONT_COLOR, None)
         txt_width, txt_height = rendered_text.get_size()
         left, top = self.game.norm_pos_to_abs((self.norm_xpos, self.norm_ypos), (txt_width, txt_height))
         disp.blit(rendered_text, pygame.Rect(left, top, txt_width, txt_height), None)
@@ -260,6 +263,7 @@ class KeySquare:
                 assert self.game.ignore_keypresses, "Refuse!"
                 self.key_is_pressed = True
                 self.game.macro.keyDown(self.keyboard_key_name.lower())
+                self.game.macro.keyUp(self.keyboard_key_name.lower())
 
                 
 
@@ -275,7 +279,6 @@ class KeySquare:
             if self.game.macro_output and not was_keypress and self.key_is_pressed:
                 assert self.game.ignore_keypresses, "Refuse!"
                 self.key_is_pressed = False
-                self.game.macro.keyUp(self.keyboard_key_name.lower())
 
     def real_toggle(self, was_keypress: bool = False):
         if self.is_really_down:
@@ -283,11 +286,15 @@ class KeySquare:
         else:
             self.real_down(was_keypress)
 
+    def okay_to_progress(self) -> bool:
+        # It's okay to leave things on, but not to have them off
+        return (not self.should_be_down) or (self.should_be_down and self.is_really_down)
+
 
 class MIDIRenderer():
     def __init__(self):
         # Settings
-        self.recording_plays = True
+        self.recording_plays = False
         self.keep_in_bounds = True
         self.macro_output = False
         self.ignore_keypresses = (False) or self.macro_output
@@ -295,14 +302,17 @@ class MIDIRenderer():
         self.key_size: T.Tuple[float, float] = (0.035, 0.08)
         self.lookahead: float = 1.0
         self.lookahead_height: float = 0.42
-        self.timescale = 1.0
+        self.timescale = 0.25
         self.paused = True # Do we start paused?
+        self.progression_mode = True
 
         self.transpose_amount = 0 # Will be adjusted if we enqueue a song
         
         # Properties - these are determined / adjusted
         self.now: float = 0.0
+        self.enqueue_at: float = 2.0
         self.is_done = False
+        self.is_staggered = True
         self.window_size: T.Tuple[int, int] = pygame.display.get_window_size()
         self.mouse_pos: T.Tuple[int, int] = pygame.mouse.get_pos()
         self.keys: T.Dict[int, KeySquare] = {}
@@ -344,15 +354,32 @@ class MIDIRenderer():
             for column in range(len(KEYBOARD_LETTERS_WITH_SKIPS[row])):
                 note_keypress = KEYBOARD_LETTERS_WITH_SKIPS[row][column]
                 if note_keypress != "_":
-                    self.keys[pitch] = KeySquare(
-                        self,
-                        pitch,
-
-                        center_xs[(real_col * N_PLAYABLE_OCTAVES) + (2 - row)], 
-                        center_ys[row],
-                    )
+                    xpos = center_xs[(real_col * N_PLAYABLE_OCTAVES) + (2 - row)]
+                    ypos = center_ys[row]
+                    if pitch not in self.keys:
+                        self.keys[pitch] = KeySquare(
+                            self,
+                            pitch,
+                            xpos,
+                            ypos,
+                        )
+                    else:
+                        self.keys[pitch].norm_xpos = xpos
+                        self.keys[pitch].norm_ypos = ypos
                     real_col += 1
                 pitch += 1
+        self.is_staggered = True
+    
+    def _rearrange(self):
+        left_norm = 0.10
+        right_norm = 0.90
+        bottom_norm = 0.85
+        center_xs = np.linspace(left_norm, right_norm, N_PLAYABLE_OCTAVES * N_NOTES_PER_ROW, endpoint=True)
+
+        for k_id, cx in zip(sorted(self.keys.keys()), center_xs):
+            self.keys[k_id].norm_ypos = bottom_norm
+            self.keys[k_id].norm_xpos = cx
+        self.is_staggered = False
 
     def _transform_pitch(self, pitch: int) -> int:
         transposed = self.transpose_amount + pitch
@@ -363,42 +390,59 @@ class MIDIRenderer():
                 transposed += OCTAVE_SEMITONES
         return transposed
 
-    def enqueue_file(self, name: str):
+    def enqueue_file(self, name: str, clear_existing: bool = False, min_confidence: float = 0.96):
         # Throw error is OK
         fn = self.known_files[name]
         self.now = 0
         notes = read_midi_file(fn)
-        tr = autotranspose(notes)
+        tr, tr_score = autotranspose(notes)
+        if tr_score < min_confidence:
+            print(f"Too many black notes: {name}: {int(tr_score*100)}% white")
+            return
         print(f"automatically transposing by {tr}")
-        self.transpose_amount = tr
+        tr_diff = tr - self.transpose_amount
 
-        for k_id in self.keys:
-            self.keys[k_id].when.clear()
-            self.keys[k_id].real_up()
+        if clear_existing:
+            for k_id in self.keys:
+                self.keys[k_id].when.clear()
+                self.keys[k_id].real_up()
+            self.enqueue_at = 2.0
 
         
         sorted_ww = sorted(notes, key=lambda ww: ww[1], reverse=False)
         
         ngood = 0
         nbad = 0
+        offset = self.enqueue_at
         for (what, when) in sorted_ww:
-            what = self._transform_pitch(what)
-            when = when + 2.0
+            what = self._transform_pitch(what + tr_diff)
+            when = when + offset
             the_key = self.keys.get(what, None)
             if the_key is not None:
                 the_key.when.append(when)
                 ngood += 1
             else:
                 nbad += 1
+            self.enqueue_at = max(self.enqueue_at, when)
         print(f"{name}: {ngood} / {ngood + nbad} :: {int(ngood / (ngood+nbad) * 100)}%")
 
+
+    def okay_to_progress(self) -> bool:
+        if self.recording_plays:
+            return True
+        else:
+            for k_id in self.keys:
+                if not self.keys[k_id].okay_to_progress():
+                    return False
+            
+            return True
 
     def update(self):
         nowtime = time.time()
 
         if self.last_update is not None:
             elapsed = nowtime - self.last_update
-            if not self.paused:
+            if not self.paused and (not self.progression_mode or self.okay_to_progress()):
                 self.now = self.now + (elapsed * self.timescale)
 
         self.last_update = nowtime
@@ -437,6 +481,18 @@ class MIDIRenderer():
                         pygame.display.set_caption("PAUSED")
                     else:
                         pygame.display.set_caption("PLAYING")
+                
+                if ev.key == pygame.K_2:
+                    if self.is_staggered:
+                        self._rearrange()
+                    else:
+                        self._setup_keys()
+
+                if ev.key == pygame.K_3:
+                    self.progression_mode = not self.progression_mode
+                
+                if ev.key == pygame.K_p:
+                    self.paused = not self.paused
             
                 if not self.ignore_keypresses:
                     for k_id in self.keys:
@@ -450,6 +506,9 @@ class MIDIRenderer():
                         k = self.keys[k_id]
                         if k.keyboard_key == ev.key:
                             k.real_up(was_keypress=True)
+                
+                if ev.key == pygame.K_p:
+                    self.paused = not self.paused
             
         if self.in_sounds is not None:
             toggled_pitches = []
@@ -524,7 +583,9 @@ def main():
     if MAKE_TRANSPARENT:
         make_window_transparent()
     game = MIDIRenderer()
-    game.enqueue_file("skyrim_theme")
+    #for each_song in game.known_files:
+    #    game.enqueue_file(each_song)
+    game.enqueue_file("canon_in_c", min_confidence=0)
     game.start()
 
 
