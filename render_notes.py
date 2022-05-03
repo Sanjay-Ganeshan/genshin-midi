@@ -23,7 +23,7 @@ FONT_COLOR = (0, 0, 0)
 MIDDLE_C = 60
 OCTAVE_SEMITONES = 12
 LOWEST_NOTE = MIDDLE_C - OCTAVE_SEMITONES
-HIGHEST_NOTE = MIDDLE_C + OCTAVE_SEMITONES + 7
+HIGHEST_NOTE = MIDDLE_C + (2 * OCTAVE_SEMITONES)
 
 # Lowest to highest
 KEYBOARD_LETTERS = [
@@ -38,7 +38,7 @@ KEYBOARD_LETTERS_WITH_SKIPS = [
 ]
 N_PLAYABLE_OCTAVES = 3
 N_NOTES_PER_ROW = 7
-MAKE_TRANSPARENT = False
+MAKE_TRANSPARENT = True
 
 def make_window_transparent():
     # Create layered window
@@ -89,13 +89,13 @@ def get_note_color(
             T.Tuple[int, int, int],
         ]
     ]:
-    lower = LOWEST_NOTE - 10
-    higher = HIGHEST_NOTE + 10
-    if pitch < lower or pitch > higher:
+    squeeze_into = 0.8
+    if pitch < LOWEST_NOTE or pitch > HIGHEST_NOTE:
         print(pitch)
         return None
     else:
-        norm_offset = (pitch - lower) / (higher - lower)
+        norm_offset = (pitch - LOWEST_NOTE) / (HIGHEST_NOTE - LOWEST_NOTE)
+        norm_offset *= squeeze_into
         upcoming = colorsys.hsv_to_rgb(norm_offset, 1.0, 1.0)
         dim = colorsys.hsv_to_rgb(norm_offset, 1.0, 0.4)
         bright = colorsys.hsv_to_rgb(norm_offset, 0.7, 1.0)
@@ -126,13 +126,78 @@ class KeySquare:
         self.is_really_down: bool = False
         self.key_is_pressed: bool = False
         self.should_be_down: bool = False
+        self.note_on: bool = False
+
+        self.when_ix = 0
+
+    def peek(self) -> T.Optional[float]:
+        if self.when_ix < len(self.when):
+            return self.when[self.when_ix]
+        else:
+            return None
+
+        
+    def pop(self) -> T.Optional[float]:
+        val = self.peek()
+        if self.when_ix < len(self.when):
+            self.when_ix += 1
+        return val
+
+
 
     def update(self, now: float) -> None:
-        while len(self.when) > 0 and self.when[-1] <= now:
-            self.when.pop()
+        n_toggles = 0
+        while (next_time := self.peek()) is not None and next_time <= now:
+            self.pop()
+            n_toggles += 1
+        
+        for n in range(n_toggles):
             self.fake_toggle()
             if self.game.recording_plays:
                 self.real_toggle()
+
+    def backout_before(self, now: float) -> None:
+        original_when_ix = self.when_ix
+        new_when_ix = original_when_ix
+
+        # Find the point where the NEXT action is in the future, and the PREVIOUS
+        # action is in the past
+        new_when_ix = max(0, new_when_ix)
+        while True:
+            prev_idx = new_when_ix - 1
+            
+            if prev_idx < 0 or prev_idx >= len(self.when):
+                prev_in_past = True
+            else:
+                prev_in_past = (self.when[prev_idx] <= now)
+            
+            if not prev_in_past:
+                new_when_ix -= 1
+                continue
+        
+            if new_when_ix < 0 or new_when_ix >= len(self.when):
+                next_in_future = True
+            else:
+                next_in_future = (self.when[new_when_ix] > now)
+            
+            if not next_in_future:
+                new_when_ix += 1
+                continue
+        
+            break
+            
+        n_toggles = original_when_ix - new_when_ix
+        
+        # Instead of toggling over and over, we can just determine if it WAS
+        # a toggle
+        is_toggle = n_toggles % 2 == 1
+        if is_toggle:
+            self.fake_toggle()
+            if self.game.recording_plays:
+                self.real_toggle()
+        self.when_ix = new_when_ix
+                    
+
 
     def fake_toggle(self):
         self.should_be_down = not self.should_be_down
@@ -145,10 +210,11 @@ class KeySquare:
 
         # Draw upcoming notes
 
-        drawing_block = len(self.when) - 1
+        drawing_block = self.when_ix
         drawing_is_stop = self.should_be_down
         prev_height = top
-        while drawing_block >= 0 and drawing_block < len(self.when):
+        is_first = True
+        while drawing_block < len(self.when):
             drawing_at = self.when[drawing_block]
             until_then = drawing_at - now
             assert until_then >= 0, "Shouldn't be in here"
@@ -156,15 +222,18 @@ class KeySquare:
                 norm_until = min(until_then / self.game.lookahead, 1.0)
                 norm_height_diff = self.game.lookahead_height * norm_until
                 block_norm_ypos = self.norm_ypos - norm_height_diff
-                block_left, block_top = self.game.norm_pos_to_abs((self.norm_xpos, block_norm_ypos), (block_width, block_height))
+                block_left, block_top = self.game.norm_pos_to_abs((self.norm_xpos, block_norm_ypos), (block_width , block_height))
                 
                 if drawing_is_stop:
-                    pygame.draw.rect(disp, self.bright_color, pygame.Rect(block_left, block_top, block_width, prev_height-block_top), 0, 10)
+                    pygame.draw.rect(disp, self.bright_color, pygame.Rect(block_left, block_top, block_width, prev_height-block_top), 0, block_width // 4)
+                    if is_first:
+                        pygame.draw.rect(disp, (0,0,0), pygame.Rect(block_left, block_top, block_width, prev_height-block_top), block_width // 7, block_width // 4)
                 else:
                     prev_height = block_top
                 
-                drawing_block -= 1
+                drawing_block += 1
                 drawing_is_stop = not drawing_is_stop
+                is_first = False
             else:
                 # Everything else is later
                 break
@@ -186,6 +255,7 @@ class KeySquare:
             self.is_really_down = True
             if self.game.play_sounds:
                 self.game.out_sounds.note_on(self.midi_key, 127, 0)
+                self.note_on = True
             if self.game.macro_output and not was_keypress and not self.game.window_focused:
                 assert self.game.ignore_keypresses, "Refuse!"
                 self.key_is_pressed = True
@@ -199,7 +269,7 @@ class KeySquare:
             self.key_is_pressed = False
         if self.is_really_down:
             self.is_really_down = False
-            if self.game.play_sounds:
+            if self.note_on:
                 self.game.out_sounds.note_off(self.midi_key, 127, 0)
             
             if self.game.macro_output and not was_keypress and self.key_is_pressed:
@@ -216,25 +286,30 @@ class KeySquare:
 
 class MIDIRenderer():
     def __init__(self):
+        # Settings
+        self.recording_plays = True
+        self.keep_in_bounds = True
+        self.macro_output = False
+        self.ignore_keypresses = (False) or self.macro_output
+        self.play_sounds = True
+        self.key_size: T.Tuple[float, float] = (0.035, 0.08)
+        self.lookahead: float = 1.0
+        self.lookahead_height: float = 0.42
+        self.timescale = 1.0
+        self.paused = True # Do we start paused?
+
+        self.transpose_amount = 0 # Will be adjusted if we enqueue a song
+        
+        # Properties - these are determined / adjusted
+        self.now: float = 0.0
         self.is_done = False
         self.window_size: T.Tuple[int, int] = pygame.display.get_window_size()
         self.mouse_pos: T.Tuple[int, int] = pygame.mouse.get_pos()
-        self.key_size: float = (0.035, 0.08)
         self.keys: T.Dict[int, KeySquare] = {}
-        self.now: float = 0.0
-        self.lookahead: float = 1.0
-        self.lookahead_height: float = 0.42
         self.last_update: T.Optional[float] = None
-        self.transpose_amount = 0
-        self.timescale = 1.0
-        self.recording_plays = True
-        self.keep_in_bounds = True
-        self.paused = True
+        
         self.window_active = True
         self.window_focused = True
-        self.ignore_keypresses = True
-        self.macro_output = True
-        self.play_sounds = True
         self.macro = InterceptionSender()
         self.known_files: T.Dict[str, str] = discover_files()
         out_port = pygame.midi.get_default_output_id()
@@ -246,6 +321,11 @@ class MIDIRenderer():
         self.out_sounds = pygame.midi.Output(out_port, 0)
 
         self.font = pygame.font.Font(pygame.font.get_default_font(), 32)
+        
+        if self.paused:
+            pygame.display.set_caption("PAUSED")
+        else:
+            pygame.display.set_caption("PLAYING")
 
         self._setup_keys()
 
@@ -297,7 +377,7 @@ class MIDIRenderer():
             self.keys[k_id].real_up()
 
         
-        sorted_ww = sorted(notes, key=lambda ww: ww[1], reverse=True)
+        sorted_ww = sorted(notes, key=lambda ww: ww[1], reverse=False)
         
         ngood = 0
         nbad = 0
@@ -328,6 +408,7 @@ class MIDIRenderer():
         self.window_active = pygame.display.get_active()
         self.window_focused = pygame.key.get_focused()
         
+        prev_play = None
         for ev in pygame.event.get():
             if ev.type == pygame.WINDOWCLOSE:
                 self.is_done = True
@@ -338,8 +419,24 @@ class MIDIRenderer():
                     self.is_done = True
                     break
             
+                if ev.key == pygame.K_RIGHT:
+                    self.now += 15
+                    prev_play = self.play_sounds
+                    self.play_sounds = False
+            
+                if ev.key == pygame.K_LEFT:
+                    self.now = max(0, self.now - 15)
+                    prev_play = self.play_sounds
+                    self.play_sounds = False
+                    for k_id in self.keys:
+                        self.keys[k_id].backout_before(self.now)
+            
                 if ev.key == pygame.K_1:
                     self.paused = not self.paused
+                    if self.paused:
+                        pygame.display.set_caption("PAUSED")
+                    else:
+                        pygame.display.set_caption("PLAYING")
             
                 if not self.ignore_keypresses:
                     for k_id in self.keys:
@@ -375,6 +472,9 @@ class MIDIRenderer():
         for k_id in self.keys:
             self.keys[k_id].update(self.now)
 
+        if prev_play is not None:
+            self.play_sounds = prev_play
+
     def norm_pos_to_abs(self, norm_pos: T.Tuple[float, float], rect_size: T.Optional[T.Tuple[int, int]] = None) -> T.Tuple[int, int]:
         if rect_size is None:
             rect_size = (0, 0)
@@ -395,7 +495,7 @@ class MIDIRenderer():
         if MAKE_TRANSPARENT:
             display.fill(TRANSPARENT_BACKGROUND)
         else:
-            display.fill((10, 10, 10))
+            display.fill((230, 230, 230))
         for k_id in self.keys:
             key = self.keys[k_id]
             key.draw(self.now)
@@ -424,7 +524,7 @@ def main():
     if MAKE_TRANSPARENT:
         make_window_transparent()
     game = MIDIRenderer()
-    #game.enqueue_file("skyrim_theme")
+    game.enqueue_file("skyrim_theme")
     game.start()
 
 
