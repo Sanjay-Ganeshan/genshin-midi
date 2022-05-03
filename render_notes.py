@@ -12,7 +12,8 @@ import time
 pygame.init()
 pygame.midi.init()
 
-from read_notes import read_midi_file, discover_files
+from read_notes import autotranspose, read_midi_file, discover_files
+from interception_py.interception_sender import InterceptionSender
 
 TRANSPARENT_BACKGROUND = (255, 0, 128)
 KEY_COLOR = (240, 240, 240)
@@ -37,6 +38,7 @@ KEYBOARD_LETTERS_WITH_SKIPS = [
 ]
 N_PLAYABLE_OCTAVES = 3
 N_NOTES_PER_ROW = 7
+MAKE_TRANSPARENT = False
 
 def make_window_transparent():
     # Create layered window
@@ -122,41 +124,53 @@ class KeySquare:
         self._pitch_name = m_pitch
 
         self.is_really_down: bool = False
+        self.key_is_pressed: bool = False
         self.should_be_down: bool = False
 
     def update(self, now: float) -> None:
         while len(self.when) > 0 and self.when[-1] <= now:
             self.when.pop()
+            self.fake_toggle()
             if self.game.recording_plays:
                 self.real_toggle()
 
+    def fake_toggle(self):
+        self.should_be_down = not self.should_be_down
 
     def draw(self, now: float) -> None:
         # Get common drawing info
         block_width, block_height = self.game.norm_size_to_abs(self.game.key_size)
+        left, top = self.game.norm_pos_to_abs((self.norm_xpos, self.norm_ypos), (block_width, block_height))
         disp = pygame.display.get_surface()
 
         # Draw upcoming notes
 
         drawing_block = len(self.when) - 1
+        drawing_is_stop = self.should_be_down
+        prev_height = top
         while drawing_block >= 0 and drawing_block < len(self.when):
             drawing_at = self.when[drawing_block]
             until_then = drawing_at - now
             assert until_then >= 0, "Shouldn't be in here"
-            if until_then < self.game.lookahead:
-                norm_until = until_then / self.game.lookahead
+            if drawing_is_stop or until_then < self.game.lookahead:
+                norm_until = min(until_then / self.game.lookahead, 1.0)
                 norm_height_diff = self.game.lookahead_height * norm_until
                 block_norm_ypos = self.norm_ypos - norm_height_diff
                 block_left, block_top = self.game.norm_pos_to_abs((self.norm_xpos, block_norm_ypos), (block_width, block_height))
-                pygame.draw.rect(disp, self.color, pygame.Rect(block_left, block_top, block_width, block_height // 4))
+                
+                if drawing_is_stop:
+                    pygame.draw.rect(disp, self.bright_color, pygame.Rect(block_left, block_top, block_width, prev_height-block_top), 0, 10)
+                else:
+                    prev_height = block_top
+                
                 drawing_block -= 1
+                drawing_is_stop = not drawing_is_stop
             else:
                 # Everything else is later
                 break
 
 
         # Draw the key
-        left, top = self.game.norm_pos_to_abs((self.norm_xpos, self.norm_ypos), (block_width, block_height))
         pygame.draw.rect(disp, self.dim_color if (self.is_really_down) else self.bright_color, pygame.Rect(left, top, block_width, block_height))
 
         # Draw the letter on the key
@@ -165,21 +179,39 @@ class KeySquare:
         left, top = self.game.norm_pos_to_abs((self.norm_xpos, self.norm_ypos), (txt_width, txt_height))
         disp.blit(rendered_text, pygame.Rect(left, top, txt_width, txt_height), None)
 
-    def real_down(self):
+    def real_down(self, was_keypress: bool = False):
+        if was_keypress:
+            self.key_is_pressed = True
         if not self.is_really_down:
             self.is_really_down = True
-            self.game.out_sounds.note_on(self.midi_key, 127, 0)
+            if self.game.play_sounds:
+                self.game.out_sounds.note_on(self.midi_key, 127, 0)
+            if self.game.macro_output and not was_keypress and not self.game.window_focused:
+                assert self.game.ignore_keypresses, "Refuse!"
+                self.key_is_pressed = True
+                self.game.macro.keyDown(self.keyboard_key_name.lower())
+
+                
+
     
-    def real_up(self):
+    def real_up(self, was_keypress: bool = False):
+        if was_keypress:
+            self.key_is_pressed = False
         if self.is_really_down:
             self.is_really_down = False
-            self.game.out_sounds.note_off(self.midi_key, 127, 0)
+            if self.game.play_sounds:
+                self.game.out_sounds.note_off(self.midi_key, 127, 0)
+            
+            if self.game.macro_output and not was_keypress and self.key_is_pressed:
+                assert self.game.ignore_keypresses, "Refuse!"
+                self.key_is_pressed = False
+                self.game.macro.keyUp(self.keyboard_key_name.lower())
 
-    def real_toggle(self):
+    def real_toggle(self, was_keypress: bool = False):
         if self.is_really_down:
-            self.real_up()
+            self.real_up(was_keypress)
         else:
-            self.real_down()
+            self.real_down(was_keypress)
 
 
 class MIDIRenderer():
@@ -194,8 +226,16 @@ class MIDIRenderer():
         self.lookahead_height: float = 0.42
         self.last_update: T.Optional[float] = None
         self.transpose_amount = 0
-        self.timescale = 0.5
-        self.recording_plays = False
+        self.timescale = 1.0
+        self.recording_plays = True
+        self.keep_in_bounds = True
+        self.paused = True
+        self.window_active = True
+        self.window_focused = True
+        self.ignore_keypresses = True
+        self.macro_output = True
+        self.play_sounds = True
+        self.macro = InterceptionSender()
         self.known_files: T.Dict[str, str] = discover_files()
         out_port = pygame.midi.get_default_output_id()
         in_port = pygame.midi.get_default_input_id()
@@ -235,22 +275,42 @@ class MIDIRenderer():
                 pitch += 1
 
     def _transform_pitch(self, pitch: int) -> int:
-        return self.transpose_amount + pitch
+        transposed = self.transpose_amount + pitch
+        if self.keep_in_bounds:
+            while transposed > HIGHEST_NOTE:
+                transposed -= OCTAVE_SEMITONES
+            while transposed < LOWEST_NOTE:
+                transposed += OCTAVE_SEMITONES
+        return transposed
 
     def enqueue_file(self, name: str):
         # Throw error is OK
         fn = self.known_files[name]
         self.now = 0
         notes = read_midi_file(fn)
+        tr = autotranspose(notes)
+        print(f"automatically transposing by {tr}")
+        self.transpose_amount = tr
+
         for k_id in self.keys:
             self.keys[k_id].when.clear()
             self.keys[k_id].real_up()
 
-        for (what, when) in sorted(notes, key=lambda ww: ww[1], reverse=True):
+        
+        sorted_ww = sorted(notes, key=lambda ww: ww[1], reverse=True)
+        
+        ngood = 0
+        nbad = 0
+        for (what, when) in sorted_ww:
             what = self._transform_pitch(what)
+            when = when + 2.0
             the_key = self.keys.get(what, None)
             if the_key is not None:
                 the_key.when.append(when)
+                ngood += 1
+            else:
+                nbad += 1
+        print(f"{name}: {ngood} / {ngood + nbad} :: {int(ngood / (ngood+nbad) * 100)}%")
 
 
     def update(self):
@@ -258,12 +318,15 @@ class MIDIRenderer():
 
         if self.last_update is not None:
             elapsed = nowtime - self.last_update
-            self.now = self.now + (elapsed * self.timescale)
+            if not self.paused:
+                self.now = self.now + (elapsed * self.timescale)
 
         self.last_update = nowtime
 
         self.window_size = pygame.display.get_window_size()
         self.mouse_pos = pygame.mouse.get_pos()
+        self.window_active = pygame.display.get_active()
+        self.window_focused = pygame.key.get_focused()
         
         for ev in pygame.event.get():
             if ev.type == pygame.WINDOWCLOSE:
@@ -275,16 +338,21 @@ class MIDIRenderer():
                     self.is_done = True
                     break
             
-                for k_id in self.keys:
-                    k = self.keys[k_id]
-                    if k.keyboard_key == ev.key:
-                        k.real_down()
+                if ev.key == pygame.K_1:
+                    self.paused = not self.paused
+            
+                if not self.ignore_keypresses:
+                    for k_id in self.keys:
+                        k = self.keys[k_id]
+                        if k.keyboard_key == ev.key:
+                            k.real_down(was_keypress=True)
             
             elif ev.type == pygame.KEYUP:
-                for k_id in self.keys:
-                    k = self.keys[k_id]
-                    if k.keyboard_key == ev.key:
-                        k.real_up()
+                if not self.ignore_keypresses:
+                    for k_id in self.keys:
+                        k = self.keys[k_id]
+                        if k.keyboard_key == ev.key:
+                            k.real_up(was_keypress=True)
             
         if self.in_sounds is not None:
             toggled_pitches = []
@@ -324,7 +392,10 @@ class MIDIRenderer():
 
     def draw(self):
         display = pygame.display.get_surface()
-        display.fill(TRANSPARENT_BACKGROUND)
+        if MAKE_TRANSPARENT:
+            display.fill(TRANSPARENT_BACKGROUND)
+        else:
+            display.fill((10, 10, 10))
         for k_id in self.keys:
             key = self.keys[k_id]
             key.draw(self.now)
@@ -332,6 +403,8 @@ class MIDIRenderer():
 
     def start(self):
         self.now = 0.0
+        if self.macro_output:
+            self.macro.start()
         while True:
             self.update()
             
@@ -342,18 +415,16 @@ class MIDIRenderer():
 
             nowtime = time.time() - self.last_update
             time.sleep(0.01)
+        if self.macro_output:
+            self.macro.close()
 
 
 def main():
-    NO_FRAME = False
-    if NO_FRAME:
-        window_flags = pygame.RESIZABLE | pygame.NOFRAME
-    else:
-        window_flags = pygame.RESIZABLE
-    pygame.display.set_mode((800, 480), window_flags)
-    make_window_transparent()
+    pygame.display.set_mode((800, 480), pygame.RESIZABLE | pygame.WINDOWMAXIMIZED)
+    if MAKE_TRANSPARENT:
+        make_window_transparent()
     game = MIDIRenderer()
-    game.enqueue_file("my_dearest")
+    #game.enqueue_file("skyrim_theme")
     game.start()
 
 
