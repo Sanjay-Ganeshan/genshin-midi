@@ -360,8 +360,7 @@ class GameSettings:
     timescale: float = field(default=1.0)
     paused: bool = field(default=True) # Do we start paused?
     progression_mode: bool = field(default=False)
-
-    transpose_amount = 0
+    transpose_amount: int = field(default=0)
 
     def __post_init__(self):
         if self.macro_output:
@@ -489,6 +488,7 @@ class MIDIRenderer():
 
     def enqueue_file(self, name: str, clear_existing: bool = False, min_confidence: float = 0.96):
         # Throw error is OK
+        name = name.lower()
         fn = self.known_files[name]
         self.now = 0
         notes = read_midi_file(fn)
@@ -696,8 +696,10 @@ def main():
     pygame.display.set_mode((800, 480), pygame.RESIZABLE)
     if MAKE_TRANSPARENT:
         make_window_transparent()
-    game = MIDIRenderer()
-    game.enqueue_file("recording_1", min_confidence=0)
+    game = MIDIRenderer(preset = GameSettings(
+        transpose_amount=-4,
+    ))
+    game.enqueue_file("Pirates_of_The_Caribbean_Medley", min_confidence=0)
     #for each_song in game.known_files:
     #    game.enqueue_file(each_song)
     game.start()

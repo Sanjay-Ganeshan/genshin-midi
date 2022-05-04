@@ -2,6 +2,8 @@ import mido
 from mido.midifiles.midifiles import DEFAULT_TICKS_PER_BEAT, DEFAULT_TEMPO
 mido.set_backend('mido.backends.rtmidi_python')
 
+from musescore_integration import convert
+
 import os
 import typing as T
 
@@ -9,6 +11,10 @@ RECORDINGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recording
 
 def read_midi_file(fname: str) -> T.List[T.Tuple[int, float]]:
     print("Reading", fname)
+    if os.path.splitext(os.path.basename(fname))[1] == ".mscz":
+        print("Converting from MuseScore")
+        fname = convert(fname)
+        
     mid = mido.MidiFile(fname)
     all_notes: T.List[T.Tuple[int, float]] = []
     t = 0
@@ -84,6 +90,7 @@ def discover_files() -> T.Dict[str, str]:
     sources = [
         "D:\\Software\\Code\\PythonScripts\\MIDI\\midi_control\\data",
         "D:\\OneDrive\\Sheet Music\\MuseScoreDownloads\\MIDI",
+        "D:\\OneDrive\\Sheet Music\\MuseScoreDownloads\\Muse",
         "D:\\OneDrive\\Sheet Music\\Piano Music\\Piano Music\\MIDIs",
         RECORDINGS,
     ]
@@ -99,6 +106,9 @@ def discover_files() -> T.Dict[str, str]:
             bn = bn.lower()
             if ext == ".mid" or ext == ".midi":
                 all_found[bn] = os.path.join(each_dir, each_file)
+            if ext == ".mscz" and bn not in all_found:
+                all_found[bn] = os.path.join(each_dir, each_file)
+
     
     return all_found
 
