@@ -486,7 +486,7 @@ class MIDIRenderer():
                 transposed += OCTAVE_SEMITONES
         return transposed
 
-    def enqueue_file(self, name: str, clear_existing: bool = False, min_confidence: float = 0.96):
+    def enqueue_file(self, name: str, clear_existing: bool = False, min_confidence: float = 0):
         # Throw error is OK
         name = name.lower()
         fn = self.known_files[name]
@@ -697,9 +697,15 @@ def main():
     if MAKE_TRANSPARENT:
         make_window_transparent()
     game = MIDIRenderer(preset = GameSettings(
-        transpose_amount=-4,
+        transpose_amount=0,
+        play_sounds=True,
+        macro_output=True,
     ))
-    game.enqueue_file("Pirates_of_The_Caribbean_Medley", min_confidence=0)
+    #game.enqueue_file("TWICE_Feel_Special", min_confidence=0)
+    #game.enqueue_file("PianoMan", min_confidence=0)
+    game.enqueue_file("EvangelionCruelAngelsThesis", min_confidence=0)
+    #game.enqueue_file("hes_a_pirate_easy")
+    #game.enqueue_file("Comptine_Yann_Tiersen")
     #for each_song in game.known_files:
     #    game.enqueue_file(each_song)
     game.start()
